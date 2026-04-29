@@ -1,0 +1,23 @@
+services:
+  node1:
+    build: .
+    command: ["node", "--node-id", "node1", "--bind-host", "0.0.0.0", "--bind-port", "5001", "--advertise-host", "node1", "--advertise-port", "5001", "--key-command", "demo=upper"]
+    ports:
+      - "5001:5001"
+
+  node2:
+    build: .
+    command: ["node", "--node-id", "node2", "--bind-host", "0.0.0.0", "--bind-port", "5002", "--advertise-host", "node2", "--advertise-port", "5002", "--seed", "node1@node1:5001", "--key-command", "demo=reverse"]
+    ports:
+      - "5002:5002"
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    command: ["node", "--node-id", "node3", "--bind-host", "0.0.0.0", "--bind-port", "5003", "--advertise-host", "node3", "--advertise-port", "5003", "--seed", "node2@node2:5002", "--seed", "node1@node1:5001", "--key-command", "demo=length"]
+    ports:
+      - "5003:5003"
+    depends_on:
+      - node1
+      - node2
