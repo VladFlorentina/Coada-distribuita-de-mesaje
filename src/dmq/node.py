@@ -128,6 +128,8 @@ class DistributedNode:
 
     def _dispatch_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
         message_type = message.get("type")
+        
+        # Madalina - functionalitate: Topologie, Discovery si mecanism Pub/Sub
         if message_type == "HELLO":
             return self._handle_hello(message)
         if message_type == "PEER_ANNOUNCE":
@@ -136,38 +138,48 @@ class DistributedNode:
             return self._handle_subscription(message, subscribe=True)
         if message_type == "UNSUBSCRIBE":
             return self._handle_subscription(message, subscribe=False)
+            
+        # Partea Colegei (Publish / DELIVER / Procesare)
         if message_type == "PUBLISH":
             return self._handle_publish(message)
         if message_type == "DELIVER":
             return self._handle_deliver(message)
+            
         return {"type": "STATUS", "status": "ERROR", "message": f"Unsupported message type: {message_type}"}
 
     def _handle_hello(self, message: dict[str, Any]) -> dict[str, Any]:
+        # Madalina - functionalitate: Gestionare conectare nod nou si anuntare port callback (Cerinta 2.2)
         peer = PeerEndpoint.from_dict(message["node"])
         if peer.identity != self.node_id:
             self.store.register_peer(peer)
             if self.store.upstream() is None:
                 self.store.set_upstream(peer.identity)
+        
+        # Anuntam in toata reteaua noul nod gasit
         self._broadcast_peer_announce(peer.identity, peer)
         return {
             "type": "HELLO_ACK",
             "status": "OK",
             "node": self.endpoint.to_dict(),
-            "peers": [peer.to_dict() for peer in self.store.list_peers()],
+            "peers": [p.to_dict() for p in self.store.list_peers()],
         }
 
     def _handle_peer_announce(self, message: dict[str, Any]) -> dict[str, Any]:
+        # Madalina - functionalitate: Propagare nod nou in retea si evidenta locala
         peer = PeerEndpoint.from_dict(message["peer"])
         visited = set(message.get("visited", []))
         if self.node_id in visited:
             return {"type": "STATUS", "status": "IGNORED"}
+            
         self.store.register_peer(peer)
         self._forward_control_message("PEER_ANNOUNCE", message, exclude={peer.identity})
         return {"type": "STATUS", "status": "OK"}
 
     def _handle_subscription(self, message: dict[str, Any], *, subscribe: bool) -> dict[str, Any]:
+        # Madalina - functionalitate: Subscriere, dezabonare si prevenire flood in propagare (Cerinta 2.3)
         key = str(message["key"])
         subscriber = PeerEndpoint.from_dict(message["subscriber"])
+        
         visited = set(message.get("visited", []))
         if self.node_id in visited:
             return {"type": "STATUS", "status": "IGNORED"}
@@ -185,60 +197,23 @@ class DistributedNode:
         return {"type": "STATUS", "status": "OK", "operation": status_text, "key": key}
 
     def _handle_publish(self, message: dict[str, Any]) -> dict[str, Any]:
-        key = str(message["key"])
-        payload_raw = decode_payload(str(message["payload"]))
-        if len(payload_raw) > self.max_payload_size:
-            return {"type": "STATUS", "status": "ERROR", "message": "Payload too large"}
-
-        subscribers = self.store.subscribers_for(key)
-        delivered = 0
-        for subscriber in subscribers:
-            if subscriber.identity == self.node_id or self._is_local_endpoint(subscriber):
-                self._process_payload(key, payload_raw, subscriber)
-                delivered += 1
-                continue
-
-            try:
-                response = send_request(
-                    subscriber.host,
-                    subscriber.port,
-                    {
-                        "type": "DELIVER",
-                        "key": key,
-                        "payload": encode_payload(payload_raw),
-                        "target": subscriber.to_dict(),
-                    },
-                )
-            except OSError:
-                self.store.remove_peer(subscriber.identity)
-                continue
-
-            if response.get("status") == "OK":
-                delivered += 1
-            else:
-                self.store.remove_peer(subscriber.identity)
-
-        return {"type": "STATUS", "status": "OK", "key": key, "delivered": delivered}
+        # TODO (Colega): Logica pentru trimiterea unui mesaj (PUBLISH)
+        # 1. Prinde payload-ul si decordeaza-l (din base64 etc. conform protocolului existent).
+        # 2. Daca marimea payload_raw este mai mare decat self.max_payload_size (limita de flood), returnati o eroare protocol.
+        # 3. Ia subscriberii activi pentru "key" folosind self.store.subscribers_for(key).
+        # 4. Trimiteti sub tipul "DELIVER" mesajul folosind send_request. (daca e un target local se poate pocesa local).
+        # 5. (Robustete) Daca da Timeout / OSError la send, apeleaza self.store.remove_peer(subscriber.identity) ca sa cureti conexiunea moarta!
+        return {"type": "STATUS", "status": "ERROR", "message": "PUBLISH neimplementat (vezi TODO)"}
 
     def _handle_deliver(self, message: dict[str, Any]) -> dict[str, Any]:
-        target = PeerEndpoint.from_dict(message["target"])
-        if not self._is_local_endpoint(target):
-            return {"type": "STATUS", "status": "IGNORED"}
-
-        key = str(message["key"])
-        payload = decode_payload(str(message["payload"]))
-        self._process_payload(key, payload, target)
-        return {"type": "STATUS", "status": "OK"}
+        # TODO (Colega): Primesti pachetul de tip "DELIVER", verifica ca tu esti target-ul.
+        # Apoi cheama functia care apeleaza execute din registry-ul de comenzi (self._process_payload).
+        return {"type": "STATUS", "status": "ERROR", "message": "DELIVER neimplementat (vezi TODO)"}
 
     def _process_payload(self, key: str, payload: bytes, target: PeerEndpoint) -> None:
-        command_name, result = self.commands.execute(key, payload)
-        self.logger.info(
-            "Processed key=%s command=%s target=%s result=%s",
-            key,
-            command_name,
-            target.identity,
-            result,
-        )
+        # TODO (Colega): Cheama self.commands.execute(key, payload)
+        # Fa un logger.info spre consola cu informatiile despre comanda executata conform cerintei "afisare locala".
+        pass
 
     def _connect_to_seeds(self) -> None:
         for seed_spec in self._seed_specs:

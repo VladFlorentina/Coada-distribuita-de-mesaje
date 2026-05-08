@@ -1,5 +1,21 @@
 # PLAN DE LUCRU
 
+## STADIU ACTUAL AL IMPLEMENTARII (Actualizat)
+
+### CE A FOST IMPLEMENTAT (Functional)
+1. **Arhitectura Hibridă (Client + Server):** Implementată prin clasa `DistributedNode`. Nodul acceptă conexiuni simultane și se leagă la primul *seed* valid găsit.
+2. **Protocolul de Bază & Discovery (Handshake):** Mesajul `HELLO` și portul *callback* funcționează perfect. Mesajele `PEER_ANNOUNCE` distribuie corect topologia în rețea.
+3. **Mecanismul Pub/Sub:** Operațiunile de `SUBSCRIBE` și `UNSUBSCRIBE` se propagă în rețea, iar prevenirea buclelor este gestionată nativ.
+4. **Procesare și Comenzi (Simulate):** Payload-ul primest comenzi prin clasa `CommandRegistry` (comenzi: `echo`, `upper`, `lower`, `reverse`, `length`). Este conform cerinței (simulat prin switch-case).
+5. **Set-up de Testare & Rulare:** Docker Compose este gata, conținând cele 3 noduri (`node1`, `node2`, `node3`) înlănțuite corespunzător.
+
+### CE MAI TREBUIE IMPLEMENTAT / RAFINAT
+1. **Heartbeat / Keep-Alive (Faza 5 - Robustețe):** Lipsesc mecanisme active (Pings) pentru ștergerea nodurilor care pică "silențios". Curățarea se face momentan doar la încercarea (eșuată) de trimitere a unui mesaj. Funcțional pentru demo, dar e punctul sensibil al sistemului.
+2. **Scripturile de Demonstrație (Faza 6 & 9.4):** E nevoie de o suită de comenzi sau un script automat (`demo.sh` / `demo.py`) care să reproducă fidel cei 7 pași pentru video, demonstrând conectarea, abonarea, publicarea, comanda executată și consecința dezabonării/deconectării.
+3. **Validări avansate de payload:** Limita maximă e setată din cod (`max_payload_size = 64 * 1024`), dar tratarea vizuală a excepției la introducerea de valori incorecte sau a absenței unei chei trebuie finisate pentru un output "curat" de consolă în demo.
+
+---
+
 ## 1. Ce trebuie construit
 
 Proiectul este un sistem distribuit de tip coada de mesaje, in care fiecare nod are dublu rol: client si server. Fiecare nod:

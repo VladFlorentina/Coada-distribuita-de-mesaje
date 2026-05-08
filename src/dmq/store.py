@@ -27,14 +27,17 @@ class PeerEndpoint:
         )
 
 
+# Madalina - functionalitate: Structuri de date locale si thread-safe (Cerintele tehnice privind memorie locala)
 class NodeStateStore:
     def __init__(self) -> None:
         self._lock = RLock()
         self._peers: dict[str, PeerEndpoint] = {}
+        # Dictionar ce mapeaza CHEIE -> (IDENTITY -> Endpoint) 
         self._subscriptions: dict[str, dict[str, PeerEndpoint]] = defaultdict(dict)
         self._upstream_id: str | None = None
 
     def register_peer(self, peer: PeerEndpoint) -> None:
+        # Madalina - functionalitate: Adaug un nod in memorie (Discovery)
         with self._lock:
             self._peers[peer.identity] = peer
 
