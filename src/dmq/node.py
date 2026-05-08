@@ -149,52 +149,78 @@ class DistributedNode:
 
     def _handle_hello(self, message: dict[str, Any]) -> dict[str, Any]:
         # Madalina - functionalitate: Gestionare conectare nod nou si anuntare port callback (Cerinta 2.2)
-        peer = PeerEndpoint.from_dict(message["node"])
-        if peer.identity != self.node_id:
-            self.store.register_peer(peer)
-            if self.store.upstream() is None:
-                self.store.set_upstream(peer.identity)
+        node_info = message.get("node", {})
+        new_peer = PeerEndpoint.from_dict(node_info)
         
-        # Anuntam in toata reteaua noul nod gasit
-        self._broadcast_peer_announce(peer.identity, peer)
+        # Daca nu sunt eu, il adaug in lista mea de peers
+        if new_peer.identity != self.node_id:
+            self.store.register_peer(new_peer)
+            # Daca e prima conexiune facuta, el devine upstream-ul meu
+            if not self.store.upstream():
+                self.store.set_upstream(new_peer.identity)
+                
+        # Mai departe, anunt toata reteaua ca a aparut un nod nou
+        self._broadcast_peer_announce(new_peer.identity, new_peer)
+        
+        # Raspund cu lista de noduri cunoscute de mine
+        known_peers = self.store.list_peers()
+        peer_list_dict = []
+        for p in known_peers:
+            peer_list_dict.append(p.to_dict())
+            
         return {
             "type": "HELLO_ACK",
             "status": "OK",
             "node": self.endpoint.to_dict(),
-            "peers": [p.to_dict() for p in self.store.list_peers()],
+            "peers": peer_list_dict,
         }
 
     def _handle_peer_announce(self, message: dict[str, Any]) -> dict[str, Any]:
         # Madalina - functionalitate: Propagare nod nou in retea si evidenta locala
-        peer = PeerEndpoint.from_dict(message["peer"])
-        visited = set(message.get("visited", []))
-        if self.node_id in visited:
+        peer_data = message.get("peer", {})
+        announced_peer = PeerEndpoint.from_dict(peer_data)
+        
+        # Prevenim flood-ul: verificam daca mesajul a trecut deja pe la noi
+        nodes_visited = set(message.get("visited", []))
+        if self.node_id in nodes_visited:
             return {"type": "STATUS", "status": "IGNORED"}
             
-        self.store.register_peer(peer)
-        self._forward_control_message("PEER_ANNOUNCE", message, exclude={peer.identity})
+        # Altfel, inregistram nodul si dam forward
+        self.store.register_peer(announced_peer)
+        self._forward_control_message("PEER_ANNOUNCE", message, exclude={announced_peer.identity})
+        
         return {"type": "STATUS", "status": "OK"}
 
     def _handle_subscription(self, message: dict[str, Any], *, subscribe: bool) -> dict[str, Any]:
         # Madalina - functionalitate: Subscriere, dezabonare si prevenire flood in propagare (Cerinta 2.3)
-        key = str(message["key"])
-        subscriber = PeerEndpoint.from_dict(message["subscriber"])
+        target_key = str(message.get("key", ""))
+        sub_info = message.get("subscriber", {})
+        client_node = PeerEndpoint.from_dict(sub_info)
         
-        visited = set(message.get("visited", []))
-        if self.node_id in visited:
+        # Logica pentru gasirea buclelor
+        already_visited = set(message.get("visited", []))
+        if self.node_id in already_visited:
             return {"type": "STATUS", "status": "IGNORED"}
 
-        if subscribe:
-            self.store.add_subscription(key, subscriber)
-            status_text = "SUBSCRIBED"
-            control_type = "SUBSCRIBE"
+        # Aplicam actiunea pe stocarea locala
+        if subscribe is True:
+            self.store.add_subscription(target_key, client_node)
+            operation_result = "SUBSCRIBED"
+            msg_type = "SUBSCRIBE"
         else:
-            self.store.remove_subscription(key, subscriber.identity)
-            status_text = "UNSUBSCRIBED"
-            control_type = "UNSUBSCRIBE"
+            self.store.remove_subscription(target_key, client_node.identity)
+            operation_result = "UNSUBSCRIBED"
+            msg_type = "UNSUBSCRIBE"
 
-        self._forward_control_message(control_type, message, exclude={subscriber.identity})
-        return {"type": "STATUS", "status": "OK", "operation": status_text, "key": key}
+        # Propagam actiunea in tot sistemul (mai putin catre cel care a initiat-o)
+        self._forward_control_message(msg_type, message, exclude={client_node.identity})
+        
+        return {
+            "type": "STATUS", 
+            "status": "OK", 
+            "operation": operation_result, 
+            "key": target_key
+        }
 
     def _handle_publish(self, message: dict[str, Any]) -> dict[str, Any]:
         # TODO (Colega): Logica pentru trimiterea unui mesaj (PUBLISH)
