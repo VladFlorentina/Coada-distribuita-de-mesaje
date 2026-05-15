@@ -223,23 +223,84 @@ class DistributedNode:
         }
 
     def _handle_publish(self, message: dict[str, Any]) -> dict[str, Any]:
-        # TODO (Colega): Logica pentru trimiterea unui mesaj (PUBLISH)
-        # 1. Prinde payload-ul si decordeaza-l (din base64 etc. conform protocolului existent).
-        # 2. Daca marimea payload_raw este mai mare decat self.max_payload_size (limita de flood), returnati o eroare protocol.
-        # 3. Ia subscriberii activi pentru "key" folosind self.store.subscribers_for(key).
-        # 4. Trimiteti sub tipul "DELIVER" mesajul folosind send_request. (daca e un target local se poate pocesa local).
-        # 5. (Robustete) Daca da Timeout / OSError la send, apeleaza self.store.remove_peer(subscriber.identity) ca sa cureti conexiunea moarta!
-        return {"type": "STATUS", "status": "ERROR", "message": "PUBLISH neimplementat (vezi TODO)"}
+        key = str(message.get("key", ""))
+        payload_encoded = message.get("payload")
+        if not isinstance(payload_encoded, str):
+            return {"type": "STATUS", "status": "ERROR", "message": "Missing payload"}
+
+        try:
+            payload_raw = decode_payload(payload_encoded)
+        except Exception as exc:
+            return {"type": "STATUS", "status": "ERROR", "message": f"Invalid payload encoding: {exc}"}
+
+        if len(payload_raw) > self.max_payload_size:
+            return {
+                "type": "STATUS",
+                "status": "ERROR",
+                "message": f"Payload too large ({len(payload_raw)} > {self.max_payload_size})",
+            }
+
+        delivered = 0
+        subscribers = self.store.subscribers_for(key)
+        for subscriber in subscribers:
+            if self._is_local_endpoint(subscriber):
+                self._process_payload(key, payload_raw, subscriber)
+                delivered += 1
+                continue
+
+            deliver_message = {
+                "type": "DELIVER",
+                "key": key,
+                "payload": encode_payload(payload_raw),
+                "target": subscriber.to_dict(),
+                "publisher": self.endpoint.to_dict(),
+            }
+
+            try:
+                response = send_request(subscriber.host, subscriber.port, deliver_message)
+            except OSError:
+                self.store.remove_peer(subscriber.identity)
+                continue
+
+            if response.get("status") == "OK":
+                delivered += 1
+
+        return {"type": "STATUS", "status": "OK", "key": key, "delivered": delivered}
 
     def _handle_deliver(self, message: dict[str, Any]) -> dict[str, Any]:
-        # TODO (Colega): Primesti pachetul de tip "DELIVER", verifica ca tu esti target-ul.
-        # Apoi cheama functia care apeleaza execute din registry-ul de comenzi (self._process_payload).
-        return {"type": "STATUS", "status": "ERROR", "message": "DELIVER neimplementat (vezi TODO)"}
+        key = str(message.get("key", ""))
+        payload_encoded = message.get("payload")
+        if not isinstance(payload_encoded, str):
+            return {"type": "STATUS", "status": "ERROR", "message": "Missing payload"}
+
+        try:
+            payload_raw = decode_payload(payload_encoded)
+        except Exception as exc:
+            return {"type": "STATUS", "status": "ERROR", "message": f"Invalid payload encoding: {exc}"}
+
+        target_data = message.get("target")
+        target = self.endpoint
+        if isinstance(target_data, dict):
+            try:
+                target = PeerEndpoint.from_dict(target_data)
+            except Exception:
+                target = self.endpoint
+
+        if target.identity != self.node_id and not self._is_local_endpoint(target):
+            return {"type": "STATUS", "status": "IGNORED"}
+
+        self._process_payload(key, payload_raw, target)
+        return {"type": "STATUS", "status": "OK"}
 
     def _process_payload(self, key: str, payload: bytes, target: PeerEndpoint) -> None:
-        # TODO (Colega): Cheama self.commands.execute(key, payload)
-        # Fa un logger.info spre consola cu informatiile despre comanda executata conform cerintei "afisare locala".
-        pass
+        command_name, result = self.commands.execute(key, payload)
+        self.logger.info(
+            "Processed deliver for key=%s target=%s command=%s result=%s",
+            key,
+            target.identity,
+            command_name,
+            result,
+        )
 
     def _connect_to_seeds(self) -> None:
         for seed_spec in self._seed_specs:
