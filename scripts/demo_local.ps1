@@ -1,5 +1,5 @@
 param(
-    [string]$Python = "C:/Users/ioana/AppData/Local/Programs/Python/Python314/python.exe",
+    [string]$Python = "python",
     [string]$Key = "demo",
     [string]$Payload = "hello world"
 )

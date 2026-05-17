@@ -70,6 +70,8 @@ class DistributedNode:
 
     def stop(self) -> None:
         self._shutdown_event.set()
+        # Notify all known peers before closing so they can clean up immediately
+        self._broadcast_disconnect()
         if self._server_socket is not None:
             try:
                 self._server_socket.close()
@@ -129,7 +131,7 @@ class DistributedNode:
     def _dispatch_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
         message_type = message.get("type")
         
-        # Madalina - functionalitate: Topologie, Discovery si mecanism Pub/Sub
+        # Topology / discovery / pub-sub dispatch
         if message_type == "HELLO":
             return self._handle_hello(message)
         if message_type == "PEER_ANNOUNCE":
@@ -138,36 +140,33 @@ class DistributedNode:
             return self._handle_subscription(message, subscribe=True)
         if message_type == "UNSUBSCRIBE":
             return self._handle_subscription(message, subscribe=False)
-            
-        # Partea Colegei (Publish / DELIVER / Procesare)
+
+        # Publish / deliver / process
         if message_type == "PUBLISH":
             return self._handle_publish(message)
         if message_type == "DELIVER":
             return self._handle_deliver(message)
-            
+        if message_type == "DISCONNECT":
+            return self._handle_disconnect(message)
+
         return {"type": "STATUS", "status": "ERROR", "message": f"Unsupported message type: {message_type}"}
 
     def _handle_hello(self, message: dict[str, Any]) -> dict[str, Any]:
-        # Madalina - functionalitate: Gestionare conectare nod nou si anuntare port callback (Cerinta 2.2)
+        # Register the new peer and broadcast its existence to all known nodes (req 2.2)
         node_info = message.get("node", {})
         new_peer = PeerEndpoint.from_dict(node_info)
-        
-        # Daca nu sunt eu, il adaug in lista mea de peers
+
         if new_peer.identity != self.node_id:
             self.store.register_peer(new_peer)
-            # Daca e prima conexiune facuta, el devine upstream-ul meu
+            # First successful connection becomes the upstream
             if not self.store.upstream():
                 self.store.set_upstream(new_peer.identity)
-                
-        # Mai departe, anunt toata reteaua ca a aparut un nod nou
+
         self._broadcast_peer_announce(new_peer.identity, new_peer)
-        
-        # Raspund cu lista de noduri cunoscute de mine
-        known_peers = self.store.list_peers()
-        peer_list_dict = []
-        for p in known_peers:
-            peer_list_dict.append(p.to_dict())
-            
+
+        # Reply with the list of all peers this node already knows about
+        peer_list_dict = [p.to_dict() for p in self.store.list_peers()]
+
         return {
             "type": "HELLO_ACK",
             "status": "OK",
@@ -176,34 +175,37 @@ class DistributedNode:
         }
 
     def _handle_peer_announce(self, message: dict[str, Any]) -> dict[str, Any]:
-        # Madalina - functionalitate: Propagare nod nou in retea si evidenta locala
+        # Store the new peer locally and forward the announcement to all other peers.
+        # The 'visited' set prevents infinite loops (flood control).
         peer_data = message.get("peer", {})
         announced_peer = PeerEndpoint.from_dict(peer_data)
-        
-        # Prevenim flood-ul: verificam daca mesajul a trecut deja pe la noi
+
         nodes_visited = set(message.get("visited", []))
         if self.node_id in nodes_visited:
             return {"type": "STATUS", "status": "IGNORED"}
-            
-        # Altfel, inregistram nodul si dam forward
+
         self.store.register_peer(announced_peer)
         self._forward_control_message("PEER_ANNOUNCE", message, exclude={announced_peer.identity})
-        
+
         return {"type": "STATUS", "status": "OK"}
 
     def _handle_subscription(self, message: dict[str, Any], *, subscribe: bool) -> dict[str, Any]:
-        # Madalina - functionalitate: Subscriere, dezabonare si prevenire flood in propagare (Cerinta 2.3)
-        target_key = str(message.get("key", ""))
+        # Subscribe / unsubscribe a peer to a key and propagate the change (req 2.3)
+        target_key = str(message.get("key", "")).strip()
+        if not target_key:
+            return {"type": "STATUS", "status": "ERROR", "message": "Missing or empty key"}
+
         sub_info = message.get("subscriber", {})
+        if not sub_info:
+            return {"type": "STATUS", "status": "ERROR", "message": "Missing subscriber field"}
         client_node = PeerEndpoint.from_dict(sub_info)
-        
-        # Logica pentru gasirea buclelor
+
+        # Loop detection: skip if this node already processed the message
         already_visited = set(message.get("visited", []))
         if self.node_id in already_visited:
             return {"type": "STATUS", "status": "IGNORED"}
 
-        # Aplicam actiunea pe stocarea locala
-        if subscribe is True:
+        if subscribe:
             self.store.add_subscription(target_key, client_node)
             operation_result = "SUBSCRIBED"
             msg_type = "SUBSCRIBE"
@@ -212,18 +214,21 @@ class DistributedNode:
             operation_result = "UNSUBSCRIBED"
             msg_type = "UNSUBSCRIBE"
 
-        # Propagam actiunea in tot sistemul (mai putin catre cel care a initiat-o)
+        # Propagate to all peers except the originator
         self._forward_control_message(msg_type, message, exclude={client_node.identity})
-        
+
         return {
-            "type": "STATUS", 
-            "status": "OK", 
-            "operation": operation_result, 
-            "key": target_key
+            "type": "STATUS",
+            "status": "OK",
+            "operation": operation_result,
+            "key": target_key,
         }
 
     def _handle_publish(self, message: dict[str, Any]) -> dict[str, Any]:
-        key = str(message.get("key", ""))
+        key = str(message.get("key", "")).strip()
+        if not key:
+            return {"type": "STATUS", "status": "ERROR", "message": "Missing or empty key"}
+
         payload_encoded = message.get("payload")
         if not isinstance(payload_encoded, str):
             return {"type": "STATUS", "status": "ERROR", "message": "Missing payload"}
@@ -268,7 +273,10 @@ class DistributedNode:
         return {"type": "STATUS", "status": "OK", "key": key, "delivered": delivered}
 
     def _handle_deliver(self, message: dict[str, Any]) -> dict[str, Any]:
-        key = str(message.get("key", ""))
+        key = str(message.get("key", "")).strip()
+        if not key:
+            return {"type": "STATUS", "status": "ERROR", "message": "Missing or empty key"}
+
         payload_encoded = message.get("payload")
         if not isinstance(payload_encoded, str):
             return {"type": "STATUS", "status": "ERROR", "message": "Missing payload"}
@@ -303,6 +311,7 @@ class DistributedNode:
         )
 
     def _connect_to_seeds(self) -> None:
+        # Try each seed in order; stop at the first successful connection (req 2.1)
         for seed_spec in self._seed_specs:
             host, node_id, port = parse_peer_spec(seed_spec)
             peer = PeerEndpoint(host=host, port=port, node_id=node_id)
@@ -318,6 +327,7 @@ class DistributedNode:
 
             self.store.register_peer(peer)
             self.store.set_upstream(peer.identity)
+            # Populate local peer table from the server's reply
             if response.get("node"):
                 try:
                     self.store.register_peer(PeerEndpoint.from_dict(response["node"]))
@@ -332,10 +342,13 @@ class DistributedNode:
             break
 
     def _broadcast_peer_announce(self, origin_identity: str, peer: PeerEndpoint) -> None:
+        # Notify all known peers about a newly joined node
         message = {"type": "PEER_ANNOUNCE", "peer": peer.to_dict(), "visited": [self.node_id]}
         self._forward_control_message("PEER_ANNOUNCE", message, exclude={origin_identity})
 
     def _forward_control_message(self, message_type: str, message: dict[str, Any], *, exclude: set[str]) -> None:
+        # Gossip-style forward: add self to 'visited', skip already-seen nodes and excluded ones.
+        # On connection error, remove the dead peer from local state.
         visited = set(message.get("visited", []))
         visited.add(self.node_id)
         forwarded = dict(message)
@@ -350,6 +363,38 @@ class DistributedNode:
             except OSError:
                 self.store.remove_peer(peer.identity)
 
+    def _broadcast_disconnect(self) -> None:
+        # Proactively tell all known peers that this node is leaving.
+        # Errors are silently ignored: the peer may already be down.
+        message = {"type": "DISCONNECT", "node": self.endpoint.to_dict()}
+        for peer in self.store.list_peers():
+            if peer.identity == self.node_id:
+                continue
+            try:
+                send_request(peer.host, peer.port, message)
+            except OSError:
+                pass
+
+    def _handle_disconnect(self, message: dict[str, Any]) -> dict[str, Any]:
+        # A peer is shutting down gracefully: remove it from all local state immediately.
+        node_data = message.get("node", {})
+        if not node_data:
+            return {"type": "STATUS", "status": "ERROR", "message": "Missing node field"}
+        try:
+            leaving_peer = PeerEndpoint.from_dict(node_data)
+        except Exception:
+            return {"type": "STATUS", "status": "ERROR", "message": "Invalid node data"}
+
+        self.store.remove_peer(leaving_peer.identity)
+        self.logger.info(
+            "Peer %s disconnected gracefully, removed from local state",
+            leaving_peer.identity,
+        )
+        return {"type": "STATUS", "status": "OK"}
+
     def _is_local_endpoint(self, peer: PeerEndpoint) -> bool:
+        # Check by node_id first (more reliable), fall back to host+port match
+        if peer.node_id and peer.node_id == self.node_id:
+            return True
         return peer.host == self.advertise_host and peer.port == self.advertise_port
 

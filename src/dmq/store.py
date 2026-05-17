@@ -29,62 +29,50 @@ class PeerEndpoint:
         )
 
 
-# Madalina - functionalitate: Structuri de date locale si thread-safe (Cerintele tehnice privind memorie locala)
+# Thread-safe local state store (req: local storage of peers + subscriptions)
 class NodeStateStore:
     def __init__(self) -> None:
-        # Lock pentru a proteja impotriva accesari concurente de la conexiuni diferite
+        # RLock protects all mutable state against concurrent access from multiple handler threads
         self._mutex = RLock()
         
-        # Salveaza toate nodurile gasite in retea dupa identity
+        # All known peers indexed by their identity (node_id or host:port)
         self.peer_registry: dict[str, PeerEndpoint] = {}
         
-        # Mapeaza o CHEIE de broadcast la un alt dictionar de ABONATI (identity -> PeerEndpoint)
+        # Maps a topic key to a dict of subscribers: identity -> PeerEndpoint
         self.subscribes_map: dict[str, dict[str, PeerEndpoint]] = defaultdict(dict)
         
-        # Nodul la care m-am conectat initial
+        # The upstream node this node connected to at startup
         self.upstream_node: str | None = None
 
     def register_peer(self, node: PeerEndpoint) -> None:
-        # Madalina - functionalitate: Adaug in memorie cand se conecteaza un nou nod
+        # Add or update a peer in the local registry
         with self._mutex:
             self.peer_registry[node.identity] = node
 
     def list_peers(self) -> list[PeerEndpoint]:
-        # Madalina - functionalitate: Returnez toti ceilalti vecini, protejat de intreruperi
+        # Return a snapshot of all known peers (thread-safe copy)
         with self._mutex:
-            known_nodes = []
-            for p in self.peer_registry.values():
-                known_nodes.append(p)
-            return known_nodes
+            return list(self.peer_registry.values())
 
     def remove_peer(self, node_identity: str) -> None:
-        # Madalina - functionalitate: Tratarea deconectarilor (Cerinta). Il sterg din lista de noduri!
+        # Remove a disconnected peer from the registry and from all subscription lists
         with self._mutex:
-            if node_identity in self.peer_registry:
-                del self.peer_registry[node_identity]
-            
-            # Parcurg toate abonamentele si il curat daca se afla printre ele
+            self.peer_registry.pop(node_identity, None)
+
             for sub_list in self.subscribes_map.values():
-                if node_identity in sub_list:
-                    del sub_list[node_identity]
-            
-            # Daca fix ala de sus a picat
+                sub_list.pop(node_identity, None)
+
             if self.upstream_node == node_identity:
                 self.upstream_node = None
 
     def prune_subscriber(self, sub_identity: str) -> None:
-        # Sterg doar pe perimetrul subscrierilor
+        # Remove a peer only from subscription lists, leaving the peer registry intact
         with self._mutex:
             for clients in self.subscribes_map.values():
-                if sub_identity in clients:
-                    del clients[sub_identity]
+                clients.pop(sub_identity, None)
 
-            # Curat cheile ramase fara consumatori
-            dead_keys = []
-            for k, c in self.subscribes_map.items():
-                if len(c) == 0:
-                    dead_keys.append(k)
-            
+            # Clean up keys that now have no subscribers
+            dead_keys = [k for k, c in self.subscribes_map.items() if not c]
             for k in dead_keys:
                 del self.subscribes_map[k]
 
@@ -97,21 +85,19 @@ class NodeStateStore:
             return self.upstream_node
 
     def add_subscription(self, topic_key: str, client_peer: PeerEndpoint) -> None:
-        # Madalina - functionalitate: Asocieaza noul subscriber la lista cheii (Cerinta 2.3)
+        # Register a subscriber for the given key (req 2.3)
         with self._mutex:
             self.subscribes_map[topic_key][client_peer.identity] = client_peer
 
     def remove_subscription(self, topic_key: str, client_identity: str) -> None:
-        # Madalina - functionalitate: Cand un nod vrea sa dea dezabonare il dam afara
+        # Remove a subscriber; clean up the key entry if no subscribers remain
         with self._mutex:
             if topic_key not in self.subscribes_map:
                 return
-            
-            if client_identity in self.subscribes_map[topic_key]:
-                del self.subscribes_map[topic_key][client_identity]
 
-            # Curatam cheia complet din memorie sa nu balteasca daca a ramas goala
-            if len(self.subscribes_map[topic_key]) == 0:
+            self.subscribes_map[topic_key].pop(client_identity, None)
+
+            if not self.subscribes_map[topic_key]:
                 del self.subscribes_map[topic_key]
 
     def has_subscription(self, topic_key: str, client_identity: str) -> bool:
@@ -122,11 +108,9 @@ class NodeStateStore:
                 return False
 
     def subscribers_for(self, topic_key: str) -> list[PeerEndpoint]:
-        # Madalina - functionalitate: Cauta in mapa la cheia respectiva si imi da toti consumatorii finali.
+        # Return all subscribers registered for a given topic key
         with self._mutex:
-            if topic_key in self.subscribes_map:
-                return list(self.subscribes_map[topic_key].values())
-            return []
+            return list(self.subscribes_map.get(topic_key, {}).values())
 
     def subscription_snapshot(self) -> dict[str, list[dict[str, object]]]:
         with self._mutex:
