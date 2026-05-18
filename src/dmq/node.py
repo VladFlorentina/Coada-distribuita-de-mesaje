@@ -70,7 +70,6 @@ class DistributedNode:
 
     def stop(self) -> None:
         self._shutdown_event.set()
-        # Notify all known peers before closing so they can clean up immediately
         self._broadcast_disconnect()
         if self._server_socket is not None:
             try:
@@ -130,8 +129,7 @@ class DistributedNode:
 
     def _dispatch_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
         message_type = message.get("type")
-        
-        # Topology / discovery / pub-sub dispatch
+
         if message_type == "HELLO":
             return self._handle_hello(message)
         if message_type == "PEER_ANNOUNCE":
@@ -141,7 +139,6 @@ class DistributedNode:
         if message_type == "UNSUBSCRIBE":
             return self._handle_subscription(message, subscribe=False)
 
-        # Publish / deliver / process
         if message_type == "PUBLISH":
             return self._handle_publish(message)
         if message_type == "DELIVER":
@@ -152,19 +149,16 @@ class DistributedNode:
         return {"type": "STATUS", "status": "ERROR", "message": f"Unsupported message type: {message_type}"}
 
     def _handle_hello(self, message: dict[str, Any]) -> dict[str, Any]:
-        # Register the new peer and broadcast its existence to all known nodes (req 2.2)
         node_info = message.get("node", {})
         new_peer = PeerEndpoint.from_dict(node_info)
 
         if new_peer.identity != self.node_id:
             self.store.register_peer(new_peer)
-            # First successful connection becomes the upstream
             if not self.store.upstream():
                 self.store.set_upstream(new_peer.identity)
 
         self._broadcast_peer_announce(new_peer.identity, new_peer)
 
-        # Reply with the list of all peers this node already knows about
         peer_list_dict = [p.to_dict() for p in self.store.list_peers()]
 
         return {
@@ -175,8 +169,6 @@ class DistributedNode:
         }
 
     def _handle_peer_announce(self, message: dict[str, Any]) -> dict[str, Any]:
-        # Store the new peer locally and forward the announcement to all other peers.
-        # The 'visited' set prevents infinite loops (flood control).
         peer_data = message.get("peer", {})
         announced_peer = PeerEndpoint.from_dict(peer_data)
 
@@ -190,7 +182,6 @@ class DistributedNode:
         return {"type": "STATUS", "status": "OK"}
 
     def _handle_subscription(self, message: dict[str, Any], *, subscribe: bool) -> dict[str, Any]:
-        # Subscribe / unsubscribe a peer to a key and propagate the change (req 2.3)
         target_key = str(message.get("key", "")).strip()
         if not target_key:
             return {"type": "STATUS", "status": "ERROR", "message": "Missing or empty key"}
@@ -200,7 +191,6 @@ class DistributedNode:
             return {"type": "STATUS", "status": "ERROR", "message": "Missing subscriber field"}
         client_node = PeerEndpoint.from_dict(sub_info)
 
-        # Loop detection: skip if this node already processed the message
         already_visited = set(message.get("visited", []))
         if self.node_id in already_visited:
             return {"type": "STATUS", "status": "IGNORED"}
@@ -214,7 +204,6 @@ class DistributedNode:
             operation_result = "UNSUBSCRIBED"
             msg_type = "UNSUBSCRIBE"
 
-        # Propagate to all peers except the originator
         self._forward_control_message(msg_type, message, exclude={client_node.identity})
 
         return {
@@ -311,7 +300,6 @@ class DistributedNode:
         )
 
     def _connect_to_seeds(self) -> None:
-        # Try each seed in order; stop at the first successful connection (req 2.1)
         for seed_spec in self._seed_specs:
             host, node_id, port = parse_peer_spec(seed_spec)
             peer = PeerEndpoint(host=host, port=port, node_id=node_id)
@@ -327,7 +315,6 @@ class DistributedNode:
 
             self.store.register_peer(peer)
             self.store.set_upstream(peer.identity)
-            # Populate local peer table from the server's reply
             if response.get("node"):
                 try:
                     self.store.register_peer(PeerEndpoint.from_dict(response["node"]))
@@ -342,13 +329,10 @@ class DistributedNode:
             break
 
     def _broadcast_peer_announce(self, origin_identity: str, peer: PeerEndpoint) -> None:
-        # Notify all known peers about a newly joined node
         message = {"type": "PEER_ANNOUNCE", "peer": peer.to_dict(), "visited": [self.node_id]}
         self._forward_control_message("PEER_ANNOUNCE", message, exclude={origin_identity})
 
     def _forward_control_message(self, message_type: str, message: dict[str, Any], *, exclude: set[str]) -> None:
-        # Gossip-style forward: add self to 'visited', skip already-seen nodes and excluded ones.
-        # On connection error, remove the dead peer from local state.
         visited = set(message.get("visited", []))
         visited.add(self.node_id)
         forwarded = dict(message)
@@ -364,8 +348,6 @@ class DistributedNode:
                 self.store.remove_peer(peer.identity)
 
     def _broadcast_disconnect(self) -> None:
-        # Proactively tell all known peers that this node is leaving.
-        # Errors are silently ignored: the peer may already be down.
         message = {"type": "DISCONNECT", "node": self.endpoint.to_dict()}
         for peer in self.store.list_peers():
             if peer.identity == self.node_id:
@@ -376,7 +358,6 @@ class DistributedNode:
                 pass
 
     def _handle_disconnect(self, message: dict[str, Any]) -> dict[str, Any]:
-        # A peer is shutting down gracefully: remove it from all local state immediately.
         node_data = message.get("node", {})
         if not node_data:
             return {"type": "STATUS", "status": "ERROR", "message": "Missing node field"}
@@ -393,7 +374,6 @@ class DistributedNode:
         return {"type": "STATUS", "status": "OK"}
 
     def _is_local_endpoint(self, peer: PeerEndpoint) -> bool:
-        # Check by node_id first (more reliable), fall back to host+port match
         if peer.node_id and peer.node_id == self.node_id:
             return True
         return peer.host == self.advertise_host and peer.port == self.advertise_port
