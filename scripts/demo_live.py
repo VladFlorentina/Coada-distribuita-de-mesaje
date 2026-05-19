@@ -23,7 +23,6 @@ def _step(title: str) -> None:
 def main() -> int:
     configure_logging(logging.INFO)
 
-    # Use ephemeral ports (0) to avoid port conflicts on Windows.
     node1 = DistributedNode(
         node_id="node1",
         bind_host="127.0.0.1",

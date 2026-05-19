@@ -1,5 +1,5 @@
 param(
-    [string]$Python = "python",
+    [string]$Python = "",
     [string]$Key = "demo",
     [string]$Payload = "hello world"
 )
@@ -8,6 +8,20 @@ $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot ".."))
 Set-Location $root
+
+if (-not $Python) {
+    $venvPython = Join-Path $root ".venv\\Scripts\\python.exe"
+    if (Test-Path $venvPython) {
+        $Python = $venvPython
+    }
+    else {
+        $cmd = Get-Command python -ErrorAction SilentlyContinue
+        if ($null -eq $cmd) {
+            throw "Python executable not found. Activate the venv or pass -Python <path to python.exe>."
+        }
+        $Python = $cmd.Source
+    }
+}
 
 $logsDir = Join-Path $root "demo-logs"
 if (Test-Path $logsDir) {
@@ -90,18 +104,35 @@ function Stop-NodeByPort {
     param([int]$Port)
 
     try {
-        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1
-        if ($null -ne $conn) {
-            try { Stop-Process -Id $conn.OwningProcess -Force -ErrorAction Stop } catch { }
+        $conns = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop)
+        foreach ($conn in $conns) {
+            if ($null -ne $conn -and $conn.OwningProcess -gt 0) {
+                try { Stop-Process -Id $conn.OwningProcess -Force -ErrorAction Stop } catch { }
+            }
         }
     }
     catch {
-        # Get-NetTCPConnection might be unavailable; ignore cleanup failures.
+    
+    }
+}
+
+function Stop-NodeProcess {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($null -eq $Process) {
+        return
+    }
+
+    try {
+        if (-not $Process.HasExited) {
+            Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+        }
+    }
+    catch {
     }
 }
 
 try {
-    # Clean start: ensure no leftover nodes are listening.
     Stop-NodeByPort -Port 5001
     Stop-NodeByPort -Port 5002
     Stop-NodeByPort -Port 5003
@@ -133,7 +164,13 @@ try {
     Start-Sleep -Seconds 1
 
     Write-Host "`n--- STEP 5: Simulate node2 crash ---"
-    Stop-NodeByPort -Port 5002
+    # Stop the exact process we started for node2 to avoid killing the wrong process.
+    if ($null -ne $node2) {
+        Stop-NodeProcess -Process $node2
+    }
+    else {
+        Stop-NodeByPort -Port 5002
+    }
     $node2 = $null
 
     Start-Sleep -Milliseconds 400
@@ -156,6 +193,9 @@ try {
 }
 finally {
     Write-Host "`nStopping nodes..."
+    Stop-NodeProcess -Process $node1
+    Stop-NodeProcess -Process $node2
+    Stop-NodeProcess -Process $node3
     Stop-NodeByPort -Port 5001
     Stop-NodeByPort -Port 5002
     Stop-NodeByPort -Port 5003

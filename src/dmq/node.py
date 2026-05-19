@@ -235,10 +235,21 @@ class DistributedNode:
             }
 
         delivered = 0
+        results: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
         subscribers = self.store.subscribers_for(key)
+        subscriber_identities = [s.identity for s in subscribers]
         for subscriber in subscribers:
             if self._is_local_endpoint(subscriber):
-                self._process_payload(key, payload_raw, subscriber)
+                command_name, result = self._process_payload(key, payload_raw, subscriber)
+                results.append(
+                    {
+                        "subscriber": subscriber.identity,
+                        "key": key,
+                        "command": command_name,
+                        "result": result,
+                    }
+                )
                 delivered += 1
                 continue
 
@@ -252,14 +263,45 @@ class DistributedNode:
 
             try:
                 response = send_request(subscriber.host, subscriber.port, deliver_message)
-            except OSError:
+            except OSError as exc:
                 self.store.remove_peer(subscriber.identity)
+                failures.append({"subscriber": subscriber.identity, "error": str(exc)})
                 continue
 
             if response.get("status") == "OK":
                 delivered += 1
 
-        return {"type": "STATUS", "status": "OK", "key": key, "delivered": delivered}
+                # If the consumer returns processing details, surface them.
+                if "command" in response or "result" in response:
+                    results.append(
+                        {
+                            "subscriber": subscriber.identity,
+                            "key": key,
+                            "command": response.get("command"),
+                            "result": response.get("result"),
+                        }
+                    )
+            else:
+                failures.append(
+                    {
+                        "subscriber": subscriber.identity,
+                        "error": f"consumer status={response.get('status')!r}",
+                        "response": response,
+                    }
+                )
+
+        response: dict[str, Any] = {
+            "type": "STATUS",
+            "status": "OK",
+            "key": key,
+            "delivered": delivered,
+            "subscribers": subscriber_identities,
+        }
+        if results:
+            response["results"] = results
+        if failures:
+            response["failures"] = failures
+        return response
 
     def _handle_deliver(self, message: dict[str, Any]) -> dict[str, Any]:
         key = str(message.get("key", "")).strip()
@@ -286,10 +328,10 @@ class DistributedNode:
         if target.identity != self.node_id and not self._is_local_endpoint(target):
             return {"type": "STATUS", "status": "IGNORED"}
 
-        self._process_payload(key, payload_raw, target)
-        return {"type": "STATUS", "status": "OK"}
+        command_name, result = self._process_payload(key, payload_raw, target)
+        return {"type": "STATUS", "status": "OK", "key": key, "command": command_name, "result": result}
 
-    def _process_payload(self, key: str, payload: bytes, target: PeerEndpoint) -> None:
+    def _process_payload(self, key: str, payload: bytes, target: PeerEndpoint) -> tuple[str, str]:
         command_name, result = self.commands.execute(key, payload)
         self.logger.info(
             "Processed deliver for key=%s target=%s command=%s result=%s",
@@ -298,6 +340,7 @@ class DistributedNode:
             command_name,
             result,
         )
+        return command_name, result
 
     def _connect_to_seeds(self) -> None:
         for seed_spec in self._seed_specs:
