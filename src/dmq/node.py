@@ -239,6 +239,7 @@ class DistributedNode:
         failures: list[dict[str, Any]] = []
         subscribers = self.store.subscribers_for(key)
         subscriber_identities = [s.identity for s in subscribers]
+        delivery_timeout = 1.0
         for subscriber in subscribers:
             if self._is_local_endpoint(subscriber):
                 command_name, result = self._process_payload(key, payload_raw, subscriber)
@@ -262,7 +263,12 @@ class DistributedNode:
             }
 
             try:
-                response = send_request(subscriber.host, subscriber.port, deliver_message)
+                response = send_request(
+                    subscriber.host,
+                    subscriber.port,
+                    deliver_message,
+                    timeout=delivery_timeout,
+                )
             except OSError as exc:
                 self.store.remove_peer(subscriber.identity)
                 failures.append({"subscriber": subscriber.identity, "error": str(exc)})
