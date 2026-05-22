@@ -56,6 +56,26 @@ class DistributedNode:
         self._start_server()
         self.store.register_peer(self.endpoint)
         self._connect_to_seeds()
+        self._ping_thread = threading.Thread(target=self._ping_loop, name=f"ping-{self.node_id}", daemon=True)
+        self._ping_thread.start()
+
+    def _ping_loop(self) -> None:
+        while not self._shutdown_event.is_set():
+            self._shutdown_event.wait(15.0)
+            if self._shutdown_event.is_set():
+                break
+            
+            ping_msg = {"type": "PING", "node": self.endpoint.to_dict()}
+            for peer in self.store.list_peers():
+                if peer.identity == self.node_id:
+                    continue
+                try:
+                    from .protocol import send_request
+                    response = send_request(peer.host, peer.port, ping_msg, timeout=2.0)
+                    if not response or response.get("status") != "OK":
+                        self.store.remove_peer(peer.identity)
+                except OSError:
+                    self.store.remove_peer(peer.identity)
 
     def serve_forever(self) -> None:
         self.start()
@@ -138,6 +158,8 @@ class DistributedNode:
             return self._handle_subscription(message, subscribe=True)
         if message_type == "UNSUBSCRIBE":
             return self._handle_subscription(message, subscribe=False)
+        if message_type == "PING":
+            return {"type": "PONG", "status": "OK"}
 
         if message_type == "PUBLISH":
             return self._handle_publish(message)
@@ -340,7 +362,7 @@ class DistributedNode:
     def _process_payload(self, key: str, payload: bytes, target: PeerEndpoint) -> tuple[str, str]:
         command_name, result = self.commands.execute(key, payload)
         self.logger.info(
-            "Processed deliver for key=%s target=%s command=%s result=%s",
+            "\033[92mProcessed deliver for key=%s target=%s command=%s result=%s\033[0m",
             key,
             target.identity,
             command_name,

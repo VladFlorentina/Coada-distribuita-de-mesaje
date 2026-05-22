@@ -135,7 +135,7 @@ def _interactive_loop(node: DistributedNode, *, initial_target: PeerEndpoint | N
         _print_menu(node, target=target)
 
         try:
-            choice = _safe_int(_prompt("\nAlegerea ta: "), default=-1)
+            choice = _safe_int(_prompt("\n\033[94mAlegerea ta:\033[0m "), default=-1)
         except KeyboardInterrupt:
             print("\nIes (Ctrl+C)...")
             return 0
@@ -198,9 +198,9 @@ def _interactive_loop(node: DistributedNode, *, initial_target: PeerEndpoint | N
 
             print("Optiune invalida.")
         except ValueError as exc:
-            print("Eroare:", exc)
+            print(f"\033[91mEroare: {exc}\033[0m")
         except OSError as exc:
-            print("Eroare retea:", exc)
+            print(f"\033[91mEroare retea: {exc}\033[0m")
 
 
 def _print_repl_help() -> None:
@@ -223,7 +223,7 @@ def _interactive_repl(node: DistributedNode, *, initial_target: PeerEndpoint | N
 
     while True:
         try:
-            line = input("dmq> ")
+            line = input("\033[94mdmq>\033[0m ")
         except (EOFError, KeyboardInterrupt):
             print("\nIes...")
             return 0
@@ -302,9 +302,9 @@ def _interactive_repl(node: DistributedNode, *, initial_target: PeerEndpoint | N
 
             print("Comanda necunoscuta. Scrie 'help'.")
         except ValueError as exc:
-            print("Eroare:", exc)
+            print(f"\033[91mEroare: {exc}\033[0m")
         except OSError as exc:
-            print("Eroare retea:", exc)
+            print(f"\033[91mEroare retea: {exc}\033[0m")
 
 
 def main(argv: list[str] | None = None) -> int:
