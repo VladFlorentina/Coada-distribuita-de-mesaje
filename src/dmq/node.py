@@ -9,6 +9,7 @@ from typing import Any
 from .commands import CommandRegistry
 from .protocol import decode_payload, encode_message, encode_payload, parse_peer_spec, send_request
 from .store import NodeStateStore, PeerEndpoint
+from .wal import WriteAheadLog
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -41,6 +42,7 @@ class DistributedNode:
         self.store = NodeStateStore()
         self.commands = CommandRegistry(key_commands)
         self.endpoint = PeerEndpoint(self.advertise_host, self.advertise_port, self.node_id)
+        self.wal = WriteAheadLog(f"wal_{self.node_id}.jsonl")
         self._seed_specs = list(seeds or [])
         self._shutdown_event = threading.Event()
         self._server_socket: socket.socket | None = None
@@ -58,6 +60,23 @@ class DistributedNode:
         self._connect_to_seeds()
         self._ping_thread = threading.Thread(target=self._ping_loop, name=f"ping-{self.node_id}", daemon=True)
         self._ping_thread.start()
+        self._replay_thread = threading.Thread(target=self._replay_wal, name=f"replay-{self.node_id}", daemon=True)
+        self._replay_thread.start()
+
+    def _replay_wal(self) -> None:
+        import time
+        time.sleep(3.0)
+        pending = self.wal.get_pending_messages()
+        if pending:
+            self.logger.info("Replaying %d pending messages from WAL", len(pending))
+        for msg in pending:
+            publish_msg = {
+                "type": "PUBLISH",
+                "key": msg["key"],
+                "payload": msg["payload"],
+                "msg_id": msg["msg_id"]
+            }
+            self._handle_publish(publish_msg)
 
     def _ping_loop(self) -> None:
         while not self._shutdown_event.is_set():
@@ -256,6 +275,12 @@ class DistributedNode:
                 "message": f"Payload too large ({len(payload_raw)} > {self.max_payload_size})",
             }
 
+        msg_id = message.get("msg_id")
+        if not msg_id:
+            import uuid
+            msg_id = uuid.uuid4().hex
+            self.wal.log_pending(msg_id, key, payload_encoded)
+
         delivered = 0
         results: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
@@ -329,6 +354,8 @@ class DistributedNode:
             response["results"] = results
         if failures:
             response["failures"] = failures
+            
+        self.wal.log_done(msg_id)
         return response
 
     def _handle_deliver(self, message: dict[str, Any]) -> dict[str, Any]:
